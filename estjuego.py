@@ -17,6 +17,12 @@ def load_data():
 
 df = load_data()
 
+# **Define key metrics before filtering**
+features = [
+    "Possession%", "Directness", "PPDA", "Deep Progressions", 
+    "Deep Progressions Conceded", "OBV", "Shots", "Shots Conceded"
+]
+
 # Sidebar filters
 st.sidebar.title("Filter Options")
 
@@ -29,7 +35,8 @@ if "Select All" in selected_leagues:
     selected_leagues = all_leagues
 
 # **Dynamically filter available Seasons based on selected Leagues**
-filtered_seasons = df[df["Liga"].isin(selected_leagues)]["Temporada"].dropna().astype(str).unique()
+df_league_filtered = df[df["Liga"].isin(selected_leagues)]  # <-- Apply League Filter
+filtered_seasons = df_league_filtered["Temporada"].dropna().astype(str).unique()
 all_seasons = sorted(filtered_seasons, key=str)
 selected_seasons = st.sidebar.multiselect("Select Seasons", ["Select All"] + all_seasons, default=["Select All"])
 
@@ -38,7 +45,8 @@ if "Select All" in selected_seasons:
     selected_seasons = all_seasons
 
 # **Dynamically filter available Técnicos based on selected Seasons**
-filtered_tecnicos = df[df["Temporada"].astype(str).isin(selected_seasons)]["Técnico"].dropna().astype(str).unique()
+df_season_filtered = df_league_filtered[df_league_filtered["Temporada"].astype(str).isin(selected_seasons)]  # <-- Apply Season Filter
+filtered_tecnicos = df_season_filtered["Técnico"].dropna().astype(str).unique()
 all_tecnicos = sorted(filtered_tecnicos, key=str)
 selected_tecnicos = st.sidebar.multiselect("Select Técnicos", ["Select All"] + all_tecnicos, default=["Select All"])
 
@@ -46,67 +54,60 @@ selected_tecnicos = st.sidebar.multiselect("Select Técnicos", ["Select All"] + 
 if "Select All" in selected_tecnicos:
     selected_tecnicos = all_tecnicos
 
-# **Apply Filters for PCA & Clustering**
-df_filtered_for_pca = df[df["Temporada"].astype(str).isin(selected_seasons)]  # Keep all técnicos for PCA
-df_display = df_filtered_for_pca[df_filtered_for_pca["Técnico"].isin(selected_tecnicos)]  # Show only selected técnico(s)
+# **Apply Final Filtering and Keep "Cluster" Column**
+df_filtered = df_season_filtered[df_season_filtered["Técnico"].isin(selected_tecnicos)].copy()  # <-- Ensure copy()
+df_filtered = df_filtered[["Liga", "Temporada", "Técnico", "Equipo"] + features]  # <-- Keep relevant columns
 
-# Check if there's data to display
-if df_display.empty:
+# **Check if filtered data is empty**
+if df_filtered.empty:
     st.warning("No data available for the selected filters.")
     st.stop()
 
-# Select key metrics for clustering
-features = [
-    "Possession%", "Directness", "PPDA", "Deep Progressions", 
-    "Deep Progressions Conceded", "OBV", "Shots", "Shots Conceded"
-]
-
-# Standardize and Apply PCA on all data (not just selected técnicos)
-X = df_filtered_for_pca[features].dropna()
+# **Compute PCA and Clustering Once on the Full Dataset**
+X = df[features].dropna()
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 pca = PCA(n_components=2)
-df_filtered_for_pca["PCA1"], df_filtered_for_pca["PCA2"] = pca.fit_transform(X_scaled).T  
+df["PCA1"], df["PCA2"] = pca.fit_transform(X_scaled).T  
 
-# Apply K-Means clustering to the entire dataset (not just the selected técnicos)
+# Apply K-Means clustering **once**
 optimal_k = 4
 kmeans = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
-df_filtered_for_pca["Cluster"] = kmeans.fit_predict(X_scaled)
+df["Cluster"] = kmeans.fit_predict(X_scaled)
 
 # **Ensure clusters always have the same meaning**
-# Get the mean values for each cluster to map them correctly
 cluster_centers = pd.DataFrame(kmeans.cluster_centers_, columns=features)
 cluster_order = cluster_centers.mean(axis=1).sort_values().index  # Sort clusters consistently
 cluster_mapping = {old: new for new, old in enumerate(cluster_order)}
-df_filtered_for_pca["Cluster"] = df_filtered_for_pca["Cluster"].map(cluster_mapping)
+df["Cluster"] = df["Cluster"].map(cluster_mapping)
 
-# **Define cluster descriptions based on fixed mapping**
+# **Now filter the dataset for visualization (with Cluster)**
+df_display = df_filtered.merge(df[["Liga", "Temporada", "Técnico", "Equipo", "PCA1", "PCA2", "Cluster"]], 
+                               on=["Liga", "Temporada", "Técnico", "Equipo"], how="left")
+
+# **Check if Cluster column is present**
+if "Cluster" not in df_display.columns:
+    st.error("Error: Cluster column is missing after filtering. Please check merge operation.")
+    st.stop()
+
+# **Define cluster descriptions**
 cluster_descriptions = {
-    "0": "Estilo de Juego Balanceado",
-    "1": "Poca Posesión y Endeblidad Defensiva",
-    "2": "Juego de Posesión, Alta Intensidad",
-    "3": "Solidez Defensiva y Juego Directo",
+    0: "Estilo de Juego Balanceado",
+    1: "Poca Posesión y Endeblidad Defensiva",
+    2: "Juego de Posesión, Alta Intensidad",
+    3: "Solidez Defensiva y Juego Directo",
 }
 
-# **Apply the same fixed colors regardless of técnico selection**
-color_mapping = {
-    "0": "#1f77b4",  # Blue
-    "1": "#d62728",  # Red
-    "2": "#ff9896",  # Light Red
-    "3": "#aec7e8",  # Light Blue
-}
 
-# Update the graph to use consistent cluster names
-df_display = df_display.merge(df_filtered_for_pca[["Técnico", "Equipo", "PCA1", "PCA2", "Cluster"]], 
-                              on=["Técnico", "Equipo"], how="left")
+# **Update the graph to use consistent cluster names**
+df_display["Cluster Name"] = df_display["Cluster"].map(cluster_descriptions)
 
 fig = px.scatter(
     df_display,
     x="PCA1", 
     y="PCA2",
-    color=df_display["Cluster"].astype(str),  
-    category_orders={"Cluster": list(cluster_descriptions.keys())},
-    color_discrete_map=color_mapping,
+    color="Cluster Name",  
+    category_orders={"Cluster Name": list(cluster_descriptions.values())},
     hover_data={
         "Técnico": True, 
         "Equipo": True, 
@@ -119,17 +120,14 @@ fig = px.scatter(
     labels={"PCA1": "Control vs. Reactive Play", "PCA2": "Directness & Pressing Intensity"},
 )
 
-# Ensure the legend always displays descriptions instead of numbers
-fig.for_each_trace(lambda t: t.update(name=f"{t.name}: {cluster_descriptions[t.name]}"))
-
 # **Add black dashed reference lines to divide the graph into four quadrants**
 fig.add_shape(
-    type="line", x0=min(df_filtered_for_pca["PCA1"]), x1=max(df_filtered_for_pca["PCA1"]),
+    type="line", x0=min(df["PCA1"]), x1=max(df["PCA1"]),
     y0=0, y1=0, line=dict(color="white", width=2, dash="dash")
 )
 fig.add_shape(
     type="line", x0=0, x1=0, 
-    y0=min(df_filtered_for_pca["PCA2"]), y1=max(df_filtered_for_pca["PCA2"]),
+    y0=min(df["PCA2"]), y1=max(df["PCA2"]),
     line=dict(color="white", width=2, dash="dash")
 )
 
